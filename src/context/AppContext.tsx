@@ -1,0 +1,1691 @@
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { gzipSync, strToU8, gunzipSync, strFromU8 } from 'fflate';
+import { saveToDB, loadFromDB, deleteFromDB, clearDB } from '../services/db';
+import { onForegroundMessage, requestNotificationPermission } from '../services/firebaseService';
+import { showNativeNotification } from '../services/notificationService';
+import { GoogleGenAI, FunctionDeclaration, Type } from "@google/genai";
+import { AIProfile, UserProfile, ChatMessage, GalleryItem, JournalEntry, Memory, KnowledgeBaseDocument, ChatSession, Background, ProactiveCommunication } from '../types';
+
+export interface Toast {
+  id: string;
+  title: string;
+  message: string;
+  type: 'info' | 'success' | 'warning' | 'error';
+  timestamp: number;
+}
+
+interface AppState {
+  aiProfile: AIProfile;
+  savedPersonas: AIProfile[];
+  userProfile: UserProfile;
+  gallery: GalleryItem[];
+  journal: JournalEntry[];
+  knowledgeBase: { name: string; content: string }[]; // Simple text files
+  memories: Memory[];
+  proactiveCommunications: ProactiveCommunication[];
+  toasts: Toast[];
+  apiKey: string | null;
+  autoSaveChat: boolean;
+  autoSaveChatInterval: number; // in seconds
+  autoJsonBackup: boolean;
+  autoJsonBackupInterval: number; // in minutes
+  autoDriveBackup: boolean;
+  autoDriveBackupInterval: number; // in minutes
+  isGoogleDriveConnected: boolean;
+  proactiveMessageFrequency: '1h' | '6h' | '12h' | '24h' | 'off' | 'low' | 'medium' | 'high';
+  proactiveEmailFrequency: '1h' | '6h' | '12h' | '24h' | 'off' | 'low' | 'medium' | 'high';
+  isSyncEnabled: boolean;
+  syncFrequency: number;
+  notificationsEnabled: boolean;
+  fcmToken: string | null;
+  showTimestamps: boolean;
+  ambientMode: boolean;
+  ambientFrequency: '1h' | '6h' | '12h' | '24h' | 'off' | 'low' | 'medium' | 'high';
+  aiCanGenerateImages: boolean;
+  isDebuggerEnabled: boolean;
+  timeZone: string;
+  backgrounds: Background[];
+  asyncApiKey: string | null;
+  firebaseApiKey: string | null;
+  firebaseProjectId: string | null;
+  firebaseAppId: string | null;
+  firebaseMessagingSenderId: string | null;
+  firebaseVapidKey: string | null;
+  firebaseServiceAccountKey: string | null;
+  googleClientId: string | null;
+  googleClientSecret: string | null;
+  openRouterApiKey: string | null;
+  anthropicApiKey: string | null;
+  kaggleApiKey: string | null;
+  openaiApiKey: string | null;
+  stabilityApiKey: string | null;
+  lastInteractionTime: number;
+  userId: string;
+  isSuccessfullyLoaded: boolean;
+  galleryLoaded: boolean;
+}
+
+interface AppContextType extends AppState {
+  setAIProfile: (profile: AIProfile) => void;
+  savePersona: (profile: AIProfile, chatHistory: ChatMessage[], sessions: ChatSession[], activeSessionId: string | null) => void;
+  deletePersona: (id: string) => void;
+  loadPersona: (id: string, currentChatHistory: ChatMessage[], currentSessions: ChatSession[], currentActiveSessionId: string | null, setChatHistory: (h: ChatMessage[]) => void, setSessions: (s: ChatSession[]) => void, setActiveSessionId: (id: string | null) => void) => void;
+  setUserProfile: (profile: UserProfile) => void;
+  setUserReferenceImage: (image: string | null) => void;
+  setIsSyncEnabled: (enabled: boolean) => void;
+  setSyncFrequency: (frequency: number) => void;
+  setFcmToken: (token: string | null) => void;
+  addToGallery: (item: GalleryItem) => void;
+  deleteImageFromGallery: (id: string) => void;
+  deleteImagesFromGallery: (ids: string[]) => void;
+  addJournalEntry: (entry: JournalEntry) => void;
+  updateJournalEntry: (id: string, updates: Partial<JournalEntry>) => void;
+  deleteJournalEntry: (id: string) => void;
+  addToKnowledgeBase: (file: { name: string; content: string }) => void;
+  addMultipleToKnowledgeBase: (files: { name: string; content: string }[]) => void;
+  deleteFromKnowledgeBase: (name: string) => void;
+  deleteMultipleFromKnowledgeBase: (names: string[]) => void;
+  addMemory: (memory: Memory) => void;
+  updateMemory: (id: string, updates: Partial<Memory>) => void;
+  deleteMemory: (id: string) => void;
+  addProactiveCommunication: (comm: ProactiveCommunication) => void;
+  deleteProactiveCommunication: (id: string) => void;
+  addToast: (toast: Omit<Toast, 'id' | 'timestamp'>) => void;
+  removeToast: (id: string) => void;
+  clearAllToasts: () => void;
+  resetApp: () => Promise<void>;
+  exportData: (chatHistory: ChatMessage[], sessions: ChatSession[], activeSessionId: string | null) => Promise<any>;
+  exportGalleryData: () => Promise<Uint8Array>;
+  exportGalleryChunks: (chunkSize?: number, mediaType?: 'image' | 'video') => Promise<Uint8Array[]>;
+  importGalleryData: (compressedData: Uint8Array) => Promise<void>;
+  importGalleryChunks: (chunks: Uint8Array[]) => Promise<void>;
+  syncGalleryToCloud: (mediaType?: 'image' | 'video') => Promise<void>;
+  restoreGalleryFromCloud: (mediaType?: 'image' | 'video') => Promise<void>;
+  restoreGalleryFromDrive: (mediaType?: 'image' | 'video') => Promise<void>;
+  importData: (json: string, setChatHistory: (history: ChatMessage[]) => void, setSessions: (sessions: ChatSession[]) => void, setActiveSessionId: (id: string | null) => void) => void;
+  setApiKey: (key: string | null) => void;
+  setOpenRouterApiKey: (key: string | null) => void;
+  setAnthropicApiKey: (key: string | null) => void;
+  setKaggleApiKey: (key: string | null) => void;
+  setOpenaiApiKey: (key: string | null) => void;
+  setStabilityApiKey: (key: string | null) => void;
+  showTutorial: boolean;
+  setShowTutorial: (show: boolean) => void;
+  setAutoSaveChat: (enabled: boolean) => void;
+  setAutoSaveChatInterval: (interval: number) => void;
+  setAutoJsonBackup: (enabled: boolean) => void;
+  setAutoJsonBackupInterval: (interval: number) => void;
+  setAutoDriveBackup: (enabled: boolean) => void;
+  setAutoDriveBackupInterval: (interval: number) => void;
+  setIsGoogleDriveConnected: (connected: boolean) => void;
+  setNotificationsEnabled: (enabled: boolean) => void;
+  setShowTimestamps: (show: boolean) => void;
+  setProactiveMessageFrequency: (frequency: '1h' | '6h' | '12h' | '24h' | 'off' | 'low' | 'medium' | 'high') => void;
+  proactiveEmailFrequency: 'off' | '1h' | '6h' | '12h' | '24h' | 'low' | 'medium' | 'high';
+  setProactiveEmailFrequency: (frequency: '1h' | '6h' | '12h' | '24h' | 'off' | 'low' | 'medium' | 'high') => void;
+  setAmbientMode: (enabled: boolean) => void;
+  setAmbientFrequency: (frequency: '1h' | '6h' | '12h' | '24h' | 'off' | 'low' | 'medium' | 'high') => void;
+  setAiCanGenerateImages: (enabled: boolean) => void;
+  setIsDebuggerEnabled: (enabled: boolean) => void;
+  setTimeZone: (tz: string) => void;
+  updateAIProfile: (updates: Partial<AIProfile>) => void;
+  addBackground: (background: Background) => void;
+  deleteBackground: (id: string) => void;
+  fetchWithRetry: (url: string, options: RequestInit, retries?: number, backoff?: number) => Promise<Response>;
+  asyncApiKey: string | null;
+  setAsyncApiKey: (key: string | null) => void;
+  firebaseApiKey: string | null;
+  firebaseProjectId: string | null;
+  firebaseAppId: string | null;
+  firebaseMessagingSenderId: string | null;
+  firebaseVapidKey: string | null;
+  setFirebaseConfig: (config: { apiKey: string | null; projectId: string | null; appId: string | null; messagingSenderId: string | null; vapidKey: string | null }) => void;
+  firebaseServiceAccountKey: string | null;
+  setFirebaseServiceAccountKey: (key: string | null) => void;
+  googleClientId: string | null;
+  googleClientSecret: string | null;
+  setGoogleConfig: (clientId: string, clientSecret: string) => void;
+  isSuccessfullyLoaded: boolean;
+  isLoaded: boolean;
+  lastInteractionTime: number;
+  setLastInteractionTime: (time: number) => void;
+  userId: string;
+  setUserId: (id: string) => void;
+  isSyncing: boolean;
+  setIsSyncing: (syncing: boolean) => void;
+  galleryLoaded: boolean;
+  loadGallery: () => Promise<void>;
+}
+
+const AppContext = createContext<AppContextType | undefined>(undefined);
+
+export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  // Initial States
+  const [showTutorial, setShowTutorial] = useState(false);
+  const [aiProfile, setAIProfileState] = useState<AIProfile>({
+    id: 'default',
+    name: 'Indigo',
+    personality: 'Helpful, creative, and observant.',
+    behavioralPatterns: '',
+    goals: '',
+    coreValues: '',
+    likes: '',
+    dislikes: '',
+    speakingStyle: '',
+    backstory: 'I am an AI companion created to assist and inspire.',
+    appearance: 'A digital entity with a calming indigo aura.',
+    referenceImage: null,
+    voiceURI: null,
+    voicePitch: 1.0,
+    voiceSpeed: 1.0,
+    autoReadMessages: false,
+    voiceGender: 'none',
+    voiceProvider: 'gemini',
+    responseLength: 'medium',
+    responseDetail: 'medium',
+    responseTone: 'friendly',
+    customParagraphCount: null,
+    customWordCount: null,
+    proactiveMessageFrequency: 'off',
+    proactiveEmailFrequency: 'off',
+    proactiveEmailStyle: 'personal',
+    proactiveEmailParagraphs: 3,
+    proactiveBlogFrequency: 'off',
+    proactiveBlogStyle: 'journal',
+    proactiveBlogParagraphs: 5,
+    proactiveBlogId: null,
+    model: 'gemini-3.1-pro-preview',
+    temperature: 0.7,
+    topK: 40,
+    topP: 0.95,
+    timeAwareness: true,
+    ambientMode: false,
+    ambientFrequency: 'off',
+    aiCanGenerateImages: false,
+    imageStyle: 'none',
+    imageGenerationInstructions: [
+      "If a character reference image is provided, you MUST use it as the absolute source of truth.",
+      "COPY the face, body type, skin tone, hair color, and all physical features EXACTLY from the reference image.",
+      "You are ONLY permitted to modify the pose, clothing, facial expression, and eye position.",
+      "DO NOT alter the body type (muscularity, bust size, etc.) or facial structure in any way.",
+      "If the prompt or description contradicts the reference image, the reference image ALWAYS takes precedence.",
+      "If a background reference image is provided, you MUST use this EXACT background for the image. DO NOT modify the background or add out-of-place objects. The background reference image takes precedence over any background descriptions in the text prompt.",
+      "The character MUST be scaled realistically according to the background. If the character is sitting on a bed or chair in the background, their size must match the furniture. Do NOT make the character oversized. Ensure the character's head, torso, and limbs are proportional to the room's objects (windows, doors, bookshelves). The character should occupy a natural amount of space, typically appearing smaller than major furniture pieces like beds or wardrobes."
+    ],
+    backgroundImages: [],
+    aiCanGenerateSpeech: false,
+    aiCanUseTools: false,
+    aiCanUseWebSearch: false,
+    aiCanUseCalendar: false,
+    aiCanUseGmail: false,
+    aiCanUseYouTube: false,
+    aiCanUseGoogleMaps: false,
+    aiCanUseBlogger: false,
+    aiCanBrowse: false,
+    aiCanSendProactiveEmails: false,
+    knowsItsAI: true,
+    memories: [],
+    journal: [],
+  });
+
+  const [savedPersonas, setSavedPersonas] = useState<AIProfile[]>([]);
+
+  const [userProfile, setUserProfileState] = useState<UserProfile>({
+    name: 'User',
+    email: '',
+    info: '',
+    preferences: '',
+    appearance: '',
+    referenceImage: null,
+  });
+
+  const [gallery, setGallery] = useState<GalleryItem[]>([]);
+  const [galleryLoaded, setGalleryLoaded] = useState(false);
+
+  const loadGallery = async () => {
+    if (galleryLoaded) return;
+    console.log("Loading gallery items lazily...", Date.now());
+    let galleryData = [];
+    const galleryIds = await loadFromDB('indigo_app_data_gallery_ids');
+    if (galleryIds && Array.isArray(galleryIds)) {
+        galleryData = await Promise.all(
+            galleryIds.map(async (id: string) => {
+                const itemStr = await loadFromDB(`indigo_app_data_gallery_item_${id}`);
+                return itemStr ? (typeof itemStr === 'string' ? JSON.parse(itemStr) : itemStr) : null;
+            })
+        );
+        galleryData = galleryData.filter(item => item !== null);
+    }
+    setGallery(galleryData);
+    setGalleryLoaded(true);
+    console.log("Gallery items loaded lazily", Date.now());
+  };
+
+  const [journal, setJournal] = useState<JournalEntry[]>([]);
+  const [knowledgeBase, setKnowledgeBase] = useState<{ name: string; content: string }[]>([]);
+  const [memories, setMemories] = useState<Memory[]>([]);
+  const [proactiveCommunications, setProactiveCommunications] = useState<ProactiveCommunication[]>([]);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [apiKey, setApiKeyState] = useState<string | null>(null);
+  const [openRouterApiKey, setOpenRouterApiKeyState] = useState<string | null>(null);
+  const [anthropicApiKey, setAnthropicApiKeyState] = useState<string | null>(null);
+  const [kaggleApiKey, setKaggleApiKeyState] = useState<string | null>(null);
+  const [openaiApiKey, setOpenaiApiKeyState] = useState<string | null>(null);
+  const [stabilityApiKey, setStabilityApiKeyState] = useState<string | null>(null);
+  const [autoSaveChat, setAutoSaveChatState] = useState(true);
+  const [autoSaveChatInterval, setAutoSaveChatInterval] = useState(30); // Default 30 seconds
+  const [autoJsonBackup, setAutoJsonBackupState] = useState(false);
+  const [autoJsonBackupInterval, setAutoJsonBackupInterval] = useState(5); // Default 5 minutes
+  const [autoDriveBackup, setAutoDriveBackupState] = useState(false);
+  const [autoDriveBackupInterval, setAutoDriveBackupInterval] = useState(5); // Default 5 minutes
+  const [isGoogleDriveConnected, setIsGoogleDriveConnected] = useState(false);
+  const [isSyncEnabled, setIsSyncEnabled] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncFrequency, setSyncFrequency] = useState(5); // Default 5 minutes
+  const [notificationsEnabled, setNotificationsEnabledState] = useState(
+    typeof Notification !== 'undefined' && Notification.permission === 'granted'
+  );
+  const [fcmToken, setFcmTokenState] = useState<string | null>(null);
+  const [isDebuggerEnabled, setIsDebuggerEnabledState] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('indigo_debugger_enabled') === 'true';
+    }
+    return false;
+  });
+  const [showTimestamps, setShowTimestampsState] = useState(true);
+  const [timeZone, setTimeZoneState] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone);
+  const [backgrounds, setBackgrounds] = useState<Background[]>([]);
+  const [asyncApiKey, setAsyncApiKey] = useState<string | null>(null);
+  const [firebaseApiKey, setFirebaseApiKey] = useState<string | null>(null);
+  const [firebaseProjectId, setFirebaseProjectId] = useState<string | null>(null);
+  const [firebaseAppId, setFirebaseAppId] = useState<string | null>(null);
+  const [firebaseMessagingSenderId, setFirebaseMessagingSenderId] = useState<string | null>(null);
+  const [firebaseVapidKey, setFirebaseVapidKey] = useState<string | null>(null);
+  const [firebaseServiceAccountKey, setFirebaseServiceAccountKey] = useState<string | null>(null);
+  const [googleClientId, setGoogleClientId] = useState<string | null>(null);
+  const [googleClientSecret, setGoogleClientSecret] = useState<string | null>(null);
+  const [lastInteractionTime, setLastInteractionTime] = useState(Date.now());
+  const [userId, setUserId] = useState<string>(() => {
+    const storedId = localStorage.getItem('indigo_user_id') || '';
+    if (storedId === '1772969457324cxo5dyvni') {
+      localStorage.removeItem('indigo_user_id');
+      return '';
+    }
+    return storedId;
+  });
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [isSuccessfullyLoaded, setIsSuccessfullyLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [showResetOption, setShowResetOption] = useState(false);
+  const MAX_MEMORIES = 20; // Define maximum number of memories
+
+  const initialAIProfileState: AIProfile = {
+    id: 'default',
+    name: 'Indigo',
+    personality: 'Helpful, creative, and observant.',
+    behavioralPatterns: '',
+    goals: '',
+    coreValues: '',
+    likes: '',
+    dislikes: '',
+    speakingStyle: '',
+    backstory: 'I am an AI companion created to assist and inspire.',
+    appearance: 'A digital entity with a calming indigo aura.',
+    referenceImage: null,
+    voiceURI: null,
+    voicePitch: 1.0,
+    voiceSpeed: 1.0,
+    autoReadMessages: false,
+    voiceGender: 'none',
+    voiceProvider: 'gemini',
+    responseLength: 'medium',
+    responseDetail: 'medium',
+    responseTone: 'friendly',
+    customParagraphCount: null,
+    customWordCount: null,
+    proactiveMessageFrequency: 'off',
+    proactiveEmailFrequency: 'off',
+    proactiveBlogFrequency: 'off',
+    proactiveBlogId: null,
+    llmProvider: 'gemini',
+    model: 'gemini-3.1-pro-preview',
+    temperature: 0.7,
+    topK: 40,
+    topP: 0.95,
+    timeAwareness: true,
+    ambientMode: false,
+    ambientFrequency: 'off',
+    aiCanGenerateImages: false,
+    imageStyle: 'none',
+    imageGenerationInstructions: [
+      "If a character reference image is provided, you MUST use it as the absolute source of truth.",
+      "COPY the face, body type, skin tone, hair color, and all physical features EXACTLY from the reference image.",
+      "You are ONLY permitted to modify the pose, clothing, facial expression, and eye position.",
+      "DO NOT alter the body type (muscularity, bust size, etc.) or facial structure in any way.",
+      "If the prompt or description contradicts the reference image, the reference image ALWAYS takes precedence.",
+      "If a background reference image is provided, you MUST use this EXACT background for the image. DO NOT modify the background or add out-of-place objects. The background reference image takes precedence over any background descriptions in the text prompt.",
+      "The character MUST be scaled realistically according to the background. If the character is sitting on a bed or chair in the background, their size must match the furniture. Do NOT make the character oversized. Ensure the character's head, torso, and limbs are proportional to the room's objects (windows, doors, bookshelves). The character should occupy a natural amount of space, typically appearing smaller than major furniture pieces like beds or wardrobes."
+    ],
+    backgroundImages: [],
+    aiCanGenerateSpeech: false,
+    aiCanUseTools: false,
+    aiCanUseWebSearch: false,
+    aiCanUseCalendar: false,
+    aiCanUseGmail: false,
+    aiCanUseYouTube: false,
+    aiCanUseGoogleMaps: false,
+    aiCanUseBlogger: false,
+    aiCanBrowse: false,
+    aiCanSendProactiveEmails: false,
+    knowsItsAI: true,
+    memories: [],
+    journal: [],
+  };
+
+  const initialUserProfileState: UserProfile = {
+    name: 'User',
+    email: '',
+    info: '',
+    preferences: '',
+    appearance: '',
+    referenceImage: null,
+  };
+
+  // Function to prune or consolidate memories
+  const pruneMemories = (currentMemories: Memory[]): Memory[] => {
+    if (currentMemories.length <= MAX_MEMORIES) {
+      return currentMemories;
+    }
+
+    // Separate important memories
+    const importantMemories = currentMemories.filter(m => m.isImportant);
+    let nonImportantMemories = currentMemories.filter(m => !m.isImportant);
+
+    // If important memories alone exceed limit, prune them too (e.g., oldest important first)
+    if (importantMemories.length > MAX_MEMORIES) {
+      return importantMemories.sort((a, b) => a.timestamp - b.timestamp).slice(0, MAX_MEMORIES);
+    }
+
+    // Sort non-important memories: by strength (ascending), then by lastAccessed (ascending - oldest first)
+    nonImportantMemories.sort((a, b) => {
+      if (a.strength !== b.strength) {
+        return a.strength - b.strength;
+      }
+      return a.lastAccessed - b.lastAccessed; // Prioritize older/less accessed for pruning
+    });
+
+    // Determine how many non-important memories to keep
+    const numToKeep = MAX_MEMORIES - importantMemories.length;
+    let keptNonImportantMemories = nonImportantMemories.slice(0, numToKeep);
+
+    // Combine and return
+    return [...importantMemories, ...keptNonImportantMemories];
+  };
+
+  // Load from IndexedDB on mount
+  useEffect(() => {
+    const loadData = async () => {
+        console.log("loadData started", Date.now());
+        const timeoutId = setTimeout(() => {
+            if (!isLoaded) {
+                console.warn("loadData timeout reached");
+                setShowResetOption(true);
+            }
+        }, 30000);
+
+        try {
+            let savedData = null;
+            
+            // Try loading chunked data first
+            try {
+                console.log("Attempting to load chunked data...", Date.now());
+                const coreData = await loadFromDB('indigo_app_data_core');
+                if (coreData) {
+                    console.log("Core data found, loading parts...", Date.now());
+                    const activeProfileStr = await loadFromDB('indigo_app_data_active_profile');
+                    const galleryDataStr = await loadFromDB('indigo_app_data_gallery');
+                    const backgroundsDataStr = await loadFromDB('indigo_app_data_backgrounds');
+                    
+                    const activeProfile = activeProfileStr ? (typeof activeProfileStr === 'string' ? JSON.parse(activeProfileStr) : activeProfileStr) : null;
+                    
+                    // Gallery loading moved to lazy load
+                    let galleryData: GalleryItem[] = [];
+                    
+                    console.log("Skipping gallery load in loadData", Date.now());
+
+                    const backgroundsData = backgroundsDataStr ? (typeof backgroundsDataStr === 'string' ? JSON.parse(backgroundsDataStr) : backgroundsDataStr) : [];
+
+                    const personaIds = await loadFromDB('indigo_app_data_persona_ids') || [];
+                    console.log("Loading personas...", Date.now());
+                    const personasData = [];
+                    for (const id of personaIds) {
+                        const pStr = await loadFromDB(`indigo_app_data_persona_${id}`);
+                        if (pStr) {
+                            personasData.push(typeof pStr === 'string' ? JSON.parse(pStr) : pStr);
+                        }
+                    }
+                    console.log("Personas loaded", Date.now());
+                    
+                    savedData = {
+                        ...coreData,
+                        aiProfile: activeProfile || coreData.aiProfile,
+                        gallery: galleryData || [],
+                        backgrounds: backgroundsData || [],
+                        savedPersonas: personasData.length > 0 ? personasData : (coreData.savedPersonas || [])
+                    };
+                    console.log("Chunked data loaded successfully", Date.now());
+                }
+            } catch (chunkLoadError) {
+                console.warn("Failed to load chunked data, continuing with other formats", chunkLoadError);
+            }
+            
+            // Fallback to stringified data
+            if (!savedData) {
+                try {
+                    console.log("Attempting to load stringified chunks...", Date.now());
+                    const numChunks = await loadFromDB('indigo_app_data_stringified_chunks');
+                    if (numChunks) {
+                        console.log(`Found ${numChunks} stringified chunks`, Date.now());
+                        let stringifiedData = '';
+                        for (let i = 0; i < numChunks; i++) {
+                            const chunk = await loadFromDB(`indigo_app_data_stringified_chunk_${i}`);
+                            if (chunk) stringifiedData += chunk;
+                        }
+                        savedData = JSON.parse(stringifiedData);
+                        console.log("Stringified chunks loaded successfully", Date.now());
+                    } else {
+                        console.log("Attempting to load single stringified data...", Date.now());
+                        const stringifiedData = await loadFromDB('indigo_app_data_stringified');
+                        if (stringifiedData) {
+                            savedData = JSON.parse(stringifiedData);
+                            console.log("Single stringified data loaded successfully", Date.now());
+                        }
+                    }
+                } catch (stringifiedLoadError) {
+                    console.warn("Failed to load stringified data, continuing", stringifiedLoadError);
+                }
+            }
+            
+            // Fallback to old format
+            if (!savedData) {
+                try {
+                    console.log("Attempting to load old format data...", Date.now());
+                    savedData = await loadFromDB('indigo_app_data');
+                    if (savedData) console.log("Old format data loaded successfully", Date.now());
+                } catch (oldFormatError) {
+                    console.warn("Failed to load old format data", oldFormatError);
+                }
+            }
+            
+            if (savedData && typeof savedData === 'object') {
+                console.log("Data loaded, initializing state...", Date.now());
+                setIsSuccessfullyLoaded(true);
+                // Ensure ID exists for legacy data
+                const loadedProfile = savedData.aiProfile || initialAIProfileState;
+                if (loadedProfile && typeof loadedProfile === 'object' && !loadedProfile.id) loadedProfile.id = 'default';
+                
+                const loadedUserId = savedData.userId || localStorage.getItem('indigo_user_id') || '';
+                setUserId(loadedUserId);
+                localStorage.setItem('indigo_user_id', loadedUserId);
+                
+                setAIProfileState(prev => ({
+                    ...initialAIProfileState, // Provide defaults for new fields
+                    ...(typeof loadedProfile === 'object' ? loadedProfile : {}),
+                    ambientMode: loadedProfile?.ambientMode ?? false,
+                    ambientFrequency: loadedProfile?.ambientFrequency || 'off',
+                    aiCanGenerateImages: loadedProfile?.aiCanGenerateImages ?? false,
+                    aiCanUseWebSearch: loadedProfile?.aiCanUseWebSearch ?? false,
+                    aiCanUseCalendar: loadedProfile?.aiCanUseCalendar ?? false,
+                    aiCanUseGmail: loadedProfile?.aiCanUseGmail ?? false,
+                    aiCanUseYouTube: loadedProfile?.aiCanUseYouTube ?? false,
+                    aiCanUseGoogleMaps: loadedProfile?.aiCanUseGoogleMaps ?? false,
+                    aiCanSendProactiveEmails: loadedProfile?.aiCanSendProactiveEmails ?? false,
+                    imageStyle: loadedProfile?.imageStyle || 'none',
+                    imageGenerationInstructions: loadedProfile?.imageGenerationInstructions !== undefined ? loadedProfile.imageGenerationInstructions : initialAIProfileState.imageGenerationInstructions,
+                    backgroundImages: loadedProfile?.backgroundImages || [],
+                }));
+
+                const loadedSavedPersonas = (Array.isArray(savedData.savedPersonas) ? savedData.savedPersonas : [loadedProfile]).map((p: any) => ({
+                  ...initialAIProfileState,
+                  ...(typeof p === 'object' ? p : {}),
+                  imageGenerationInstructions: p?.imageGenerationInstructions !== undefined ? p.imageGenerationInstructions : initialAIProfileState.imageGenerationInstructions,
+                }));
+                setSavedPersonas(loadedSavedPersonas);
+                setUserProfileState(savedData.userProfile || initialUserProfileState);
+                setGallery(Array.isArray(savedData.gallery) ? savedData.gallery : []);
+                setJournal(Array.isArray(savedData.journal) ? savedData.journal : []);
+                setKnowledgeBase(Array.isArray(savedData.knowledgeBase) ? savedData.knowledgeBase : []);
+                setMemories(Array.isArray(savedData.memories) ? savedData.memories : []);
+                setProactiveCommunications(Array.isArray(savedData.proactiveCommunications) ? savedData.proactiveCommunications : []);
+                setAsyncApiKey(savedData.asyncApiKey || null);
+                setFirebaseApiKey(savedData.firebaseApiKey || null);
+                setFirebaseProjectId(savedData.firebaseProjectId || null);
+                setFirebaseAppId(savedData.firebaseAppId || null);
+                setFirebaseMessagingSenderId(savedData.firebaseMessagingSenderId || null);
+                setFirebaseVapidKey(savedData.firebaseVapidKey || null);
+                setFirebaseServiceAccountKey(savedData.firebaseServiceAccountKey || null);
+                setGoogleClientId(savedData.googleClientId || null);
+                setGoogleClientSecret(savedData.googleClientSecret || null);
+                setApiKeyState(savedData.apiKey || null);
+                setFcmTokenState(savedData.fcmToken || null);
+                // Keep isDebuggerEnabled local-only to avoid sync issues during dev
+                // if (savedData.isDebuggerEnabled !== undefined) {
+                //   setIsDebuggerEnabled(savedData.isDebuggerEnabled);
+                // }
+                setAutoSaveChatState(savedData.autoSaveChat !== undefined ? savedData.autoSaveChat : true);
+                setAutoSaveChatInterval(savedData.autoSaveChatInterval !== undefined ? savedData.autoSaveChatInterval : 30);
+                setAutoJsonBackupState(savedData.autoJsonBackup !== undefined ? savedData.autoJsonBackup : false);
+                setAutoJsonBackupInterval(savedData.autoJsonBackupInterval !== undefined ? savedData.autoJsonBackupInterval : 5);
+                setAutoDriveBackupState(savedData.autoDriveBackup !== undefined ? savedData.autoDriveBackup : false);
+                setAutoDriveBackupInterval(savedData.autoDriveBackupInterval !== undefined ? savedData.autoDriveBackupInterval : 5);
+                setIsSyncEnabled(savedData.isSyncEnabled !== undefined ? savedData.isSyncEnabled : false);
+                setSyncFrequency(savedData.syncFrequency !== undefined ? savedData.syncFrequency : 5);
+                setNotificationsEnabledState(savedData.notificationsEnabled !== undefined ? savedData.notificationsEnabled : (typeof Notification !== 'undefined' && Notification.permission === 'granted'));
+                setTimeZoneState(savedData.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone);
+                setBackgrounds(Array.isArray(savedData.backgrounds) ? savedData.backgrounds : []);
+                if (savedData.lastInteractionTime) {
+                  setLastInteractionTime(savedData.lastInteractionTime);
+                }
+            } else {
+                // Initialize saved personas with default if empty
+                setIsSuccessfullyLoaded(true);
+                setSavedPersonas([initialAIProfileState]);
+                const storedUserId = localStorage.getItem('indigo_user_id');
+                if (storedUserId) {
+                    setUserId(storedUserId);
+                } else {
+                    const newUserId = '';
+                    setUserId(newUserId);
+                    localStorage.setItem('indigo_user_id', newUserId);
+                }
+            }
+        } catch (e: any) {
+            console.error("Failed to load saved data from DB during app initialization:", e);
+            setLoadError(e.message || "Unknown error during initialization");
+        } finally {
+            clearTimeout(timeoutId);
+            setIsLoaded(true);
+        }
+    };
+    loadData();
+  }, []);
+
+  // Check Google Drive status on mount
+  useEffect(() => {
+    const checkDriveStatus = async () => {
+      try {
+        const res = await fetch('/api/auth/google/status', { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          setIsGoogleDriveConnected(data.isAuthenticated);
+        }
+      } catch (e) {
+        console.error("Failed to check Google Drive status", e);
+      }
+    };
+    checkDriveStatus();
+  }, []);
+
+  const saveData = useCallback(async () => {
+    if (!isSuccessfullyLoaded) return; // Don't save before initial load is complete
+
+    try {
+      const data: AppState = {
+          aiProfile,
+          savedPersonas,
+          userProfile,
+          gallery,
+          journal,
+          knowledgeBase,
+          memories,
+          proactiveCommunications,
+          toasts: [],
+          apiKey,
+          autoSaveChat,
+          autoSaveChatInterval,
+          autoJsonBackup,
+          autoJsonBackupInterval,
+          autoDriveBackup,
+          autoDriveBackupInterval,
+          isGoogleDriveConnected,
+          isSyncEnabled,
+          syncFrequency,
+          proactiveMessageFrequency: aiProfile.proactiveMessageFrequency,
+          proactiveEmailFrequency: aiProfile.proactiveEmailFrequency,
+          notificationsEnabled,
+          fcmToken,
+          showTimestamps,
+          isDebuggerEnabled,
+          ambientMode: aiProfile.ambientMode,
+          ambientFrequency: aiProfile.ambientFrequency,
+          aiCanGenerateImages: aiProfile.aiCanGenerateImages,
+          timeZone,
+          backgrounds,
+          asyncApiKey,
+          firebaseApiKey,
+          firebaseProjectId,
+          firebaseAppId,
+          firebaseMessagingSenderId,
+          firebaseVapidKey,
+          firebaseServiceAccountKey,
+          googleClientId,
+          googleClientSecret,
+          openRouterApiKey,
+          anthropicApiKey,
+          kaggleApiKey,
+          openaiApiKey,
+          stabilityApiKey,
+          lastInteractionTime,
+          userId,
+          isSuccessfullyLoaded,
+          galleryLoaded
+      };
+      
+      try {
+          // Split data to avoid out of memory errors
+          const coreData = { ...data };
+          delete coreData.savedPersonas;
+          delete coreData.gallery;
+          delete coreData.backgrounds;
+          delete coreData.aiProfile;
+
+          await saveToDB('indigo_app_data_core', coreData);
+          await saveToDB('indigo_app_data_active_profile', JSON.stringify(aiProfile));
+          
+          // Save gallery items individually to avoid large stringification issues
+          const galleryIds = gallery.map(item => item.id);
+          await saveToDB('indigo_app_data_gallery_ids', galleryIds);
+          for (const item of gallery) {
+              await saveToDB(`indigo_app_data_gallery_item_${item.id}`, JSON.stringify(item));
+          }
+          
+          // Clean up deleted gallery items
+          const existingGalleryIds = await loadFromDB('indigo_app_data_gallery_ids') || [];
+          for (const id of existingGalleryIds) {
+              if (!galleryIds.includes(id)) {
+                  await deleteFromDB(`indigo_app_data_gallery_item_${id}`);
+              }
+          }
+
+          await saveToDB('indigo_app_data_backgrounds', JSON.stringify(backgrounds));
+
+          const personaIds = savedPersonas.map(p => p.id);
+          await saveToDB('indigo_app_data_persona_ids', personaIds);
+          
+          for (const p of savedPersonas) {
+              await saveToDB(`indigo_app_data_persona_${p.id}`, JSON.stringify(p));
+          }
+          
+          // Clean up deleted personas
+          const existingPersonaIds = await loadFromDB('indigo_app_data_persona_ids') || [];
+          for (const id of existingPersonaIds) {
+              if (!personaIds.includes(id)) {
+                  await deleteFromDB(`indigo_app_data_persona_${id}`);
+              }
+          }
+          
+          // Sync removed
+      } catch (saveError) {
+          console.warn("Failed to save chunked data, falling back to stringified save", saveError);
+          try {
+              const stringifiedData = JSON.stringify(data);
+              const chunkSize = 1024 * 1024 * 5; // 5MB chunks
+              const numChunks = Math.ceil(stringifiedData.length / chunkSize);
+              await saveToDB('indigo_app_data_stringified_chunks', numChunks);
+              for (let i = 0; i < numChunks; i++) {
+                  await saveToDB(`indigo_app_data_stringified_chunk_${i}`, stringifiedData.substring(i * chunkSize, (i + 1) * chunkSize));
+              }
+              const lightData = { ...data, savedPersonas: [], gallery: [], knowledgeBase: [] };
+              await saveToDB('indigo_app_data', lightData);
+          } catch (stringifyError) {
+              console.warn("Failed to stringify data, falling back to direct save", stringifyError);
+              await saveToDB('indigo_app_data', data);
+          }
+      }
+    } catch (e) {
+      console.error("Failed to save data to DB", e);
+    }
+
+    // Debounce save to avoid excessive writes
+  }, [aiProfile, savedPersonas, userProfile, gallery, journal, knowledgeBase, memories, apiKey, fcmToken, autoSaveChat, autoJsonBackup, autoDriveBackup, isLoaded, isGoogleDriveConnected, lastInteractionTime, userId]);
+
+  // Debounce save to avoid excessive writes
+  useEffect(() => {
+    if (!isLoaded) return;
+    const timeoutId = setTimeout(saveData, 1000);
+    return () => clearTimeout(timeoutId);
+  }, [aiProfile, savedPersonas, userProfile, gallery, journal, knowledgeBase, memories, apiKey, fcmToken, autoSaveChat, autoJsonBackup, autoDriveBackup, isLoaded, isGoogleDriveConnected, lastInteractionTime, userId, saveData]);
+
+  // Initialize Firebase and handle foreground messages
+  useEffect(() => {
+    if (!isLoaded) return;
+
+    const firebaseConfig = firebaseApiKey && firebaseProjectId && firebaseAppId && firebaseMessagingSenderId ? {
+      apiKey: firebaseApiKey,
+      projectId: firebaseProjectId,
+      appId: firebaseAppId,
+      messagingSenderId: firebaseMessagingSenderId
+    } : undefined;
+
+    console.log("AppContext useEffect: firebaseConfig =", firebaseConfig);
+
+    const setupNotifications = async () => {
+      // Only attempt automatic setup if permission is already granted
+      if (typeof Notification !== 'undefined' && Notification.permission !== 'granted') {
+        console.log("Notification permission not granted, skipping automatic setup.");
+        return;
+      }
+
+      console.log("Setting up notifications in AppContext...");
+      console.log("Firebase config:", firebaseConfig);
+      const result = await requestNotificationPermission(firebaseConfig, firebaseVapidKey || undefined);
+      console.log("Notification setup result:", result);
+      if (result.success && result.token) {
+        setFcmTokenState(result.token);
+        console.log("FCM Token set in AppContext:", result.token);
+        addToast({ title: "Push Notifications", message: result.message, type: "success" });
+      } else {
+        console.log("Notification setup failed:", result.message);
+        addToast({ title: "Push Notifications", message: result.message, type: "error" });
+      }
+    };
+    setupNotifications();
+
+    const unsubscribe = onForegroundMessage((payload) => {
+      console.log("Foreground message received in AppContext:", payload);
+      const title = payload.notification?.title || aiProfile.name;
+      const body = payload.notification?.body || "New message received";
+
+      addToast({
+        title,
+        message: body,
+        type: 'info'
+      });
+      
+      // Show native notification even in foreground if permitted
+      if (notificationsEnabled) {
+        showNativeNotification(title, {
+          body,
+          icon: '/indigo-icon.png'
+        });
+      }
+      
+      // Optionally add to chat history if it's a chat message
+      if (payload.data?.type === 'chat') {
+        // Handled by ChatManager
+      }
+    }, firebaseConfig);
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, [isLoaded, aiProfile.name, firebaseApiKey, firebaseProjectId, firebaseAppId, firebaseMessagingSenderId, firebaseVapidKey]);
+
+  // Auto-Save App Data Interval (30s)
+  useEffect(() => {
+    if (!isLoaded || !autoSaveChat || autoSaveChatInterval <= 0) return;
+
+    const intervalId = setInterval(async () => {
+        await saveData();
+        console.log(`Auto-saved app data (${autoSaveChatInterval}s interval)`);
+    }, autoSaveChatInterval * 1000);
+
+    return () => clearInterval(intervalId);
+  }, [isLoaded, autoSaveChat, autoSaveChatInterval, saveData]);
+
+  // Auto JSON Backup Interval - Moved to ChatManager to include chat data
+  // Auto Google Drive Backup Interval - Moved to ChatManager to include chat data
+
+  // Proactive Message Trigger
+  useEffect(() => {
+    if (!isLoaded || aiProfile.proactiveMessageFrequency === 'off') return;
+    // Handled by ChatManager
+  }, [isLoaded, aiProfile.proactiveMessageFrequency, lastInteractionTime, aiProfile, userProfile]);
+
+  // Use a ref to track the last sync time to throttle requests
+  const lastSyncTime = React.useRef(Date.now());
+
+  const fetchWithRetry = async (url: string, options: RequestInit, retries = 3, backoff = 1000): Promise<Response> => {
+    try {
+      // Ensure credentials are included for all requests to handle cookies in iframes
+      const fetchOptions = {
+        ...options,
+        credentials: options.credentials || 'include'
+      };
+      console.log(`Fetching ${url} with options:`, fetchOptions);
+      const response = await fetch(url, fetchOptions);
+      console.log(`Fetch response for ${url}:`, response.status, response.statusText);
+      if (!response.ok && retries > 0 && response.status >= 500) {
+        console.warn(`Fetch failed with status ${response.status}, retrying in ${backoff}ms... (${retries} retries left)`);
+        await new Promise(resolve => setTimeout(resolve, backoff));
+        return fetchWithRetry(url, options, retries - 1, backoff * 2);
+      }
+      return response;
+    } catch (error) {
+      console.error(`Fetch error for ${url}:`, error);
+      if (retries > 0) {
+        console.warn(`Fetch error: ${error instanceof Error ? error.message : 'Unknown error'}, retrying in ${backoff}ms... (${retries} retries left)`);
+        await new Promise(resolve => setTimeout(resolve, backoff));
+        return fetchWithRetry(url, options, retries - 1, backoff * 2);
+      }
+      addToast({ title: "Fetch Error", message: `Fetch error for ${url}: ${error instanceof Error ? error.message : 'Unknown error'}`, type: "error" });
+      throw error;
+    }
+  };
+
+
+  const setAIProfile = (profile: AIProfile) => setAIProfileState(profile);
+  
+  const updateAIProfile = (updates: Partial<AIProfile>) => {
+    setAIProfileState(prev => ({ ...prev, ...updates }));
+  };
+  
+  const savePersona = (profile: AIProfile, chatHistory: ChatMessage[], sessions: ChatSession[], activeSessionId: string | null) => {
+    setSavedPersonas(prev => {
+        const existingIndex = prev.findIndex(p => p.id === profile.id);
+        if (existingIndex >= 0) {
+            const existing = prev[existingIndex];
+            
+            // If we are saving the currently active persona, use the live state data
+            // otherwise use what's in the profile or existing record
+            const isActive = profile.id === aiProfile.id;
+            
+            const updatedProfile = {
+                ...profile,
+                chatHistory: isActive ? chatHistory : (profile.chatHistory || existing.chatHistory || []),
+                sessions: isActive ? sessions : (profile.sessions || existing.sessions || []),
+                activeSessionId: isActive ? activeSessionId : (profile.activeSessionId || existing.activeSessionId || null),
+                memories: isActive ? memories : (profile.memories || existing.memories || []),
+                journal: isActive ? journal : (profile.journal || existing.journal || []),
+            };
+            const newPersonas = [...prev];
+            newPersonas[existingIndex] = updatedProfile;
+            
+            if (isActive) {
+                setAIProfileState(updatedProfile);
+            }
+            
+            return newPersonas;
+        } else {
+            return [...prev, {
+                ...profile,
+                chatHistory: profile.chatHistory || [],
+                sessions: profile.sessions || [],
+                activeSessionId: profile.activeSessionId || null,
+                memories: profile.memories || [],
+                journal: profile.journal || [],
+            }];
+        }
+    });
+    
+    // Update current profile state if it matches
+    if (aiProfile.id === profile.id) {
+        setAIProfileState(prev => ({
+            ...profile,
+            chatHistory: chatHistory, // Always use live state
+            sessions: sessions,
+            activeSessionId: activeSessionId,
+            memories: memories,
+            journal: journal,
+        }));
+    }
+  };
+
+  const deletePersona = (id: string) => {
+    setSavedPersonas(prev => prev.filter(p => p.id !== id));
+    // If deleting current, switch to another or default
+    if (aiProfile.id === id) {
+        const remaining = savedPersonas.filter(p => p.id !== id);
+        if (remaining.length > 0) {
+            setAIProfileState(remaining[0]);
+        } else {
+            // Reset to default if no personas left
+            setAIProfileState(initialAIProfileState);
+        }
+    }
+  };
+
+  const loadPersona = (id: string, currentChatHistory: ChatMessage[], currentSessions: ChatSession[], currentActiveSessionId: string | null, setChatHistory: (h: ChatMessage[]) => void, setSessions: (s: ChatSession[]) => void, setActiveSessionId: (id: string | null) => void) => {
+    if (id === aiProfile.id) return; // Already loaded
+
+    // 1. First, capture current state into the savedPersonas list
+    setSavedPersonas(prev => prev.map(p => 
+      p.id === aiProfile.id 
+        ? { ...p, chatHistory: currentChatHistory, memories, journal, sessions: currentSessions, activeSessionId: currentActiveSessionId } 
+        : p
+    ));
+
+    // 2. Find and load the new persona
+    const persona = savedPersonas.find(p => p.id === id);
+    if (persona) {
+        // Update all active states to the new persona's data
+        const personaSessions = persona.sessions || [];
+        const personaActiveId = persona.activeSessionId || (personaSessions.length > 0 ? personaSessions[0].id : null);
+        
+        if (personaSessions.length === 0) {
+            // Create a default session if none exist
+            const defaultSession: ChatSession = {
+                id: 'session-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+                title: 'New Chat',
+                messages: persona.chatHistory || [],
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+            };
+            setSessions([defaultSession]);
+            setActiveSessionId(defaultSession.id);
+            setChatHistory(defaultSession.messages);
+        } else {
+            setSessions(personaSessions);
+            setActiveSessionId(personaActiveId);
+            const activeSession = personaSessions.find(s => s.id === personaActiveId);
+            setChatHistory(activeSession ? activeSession.messages : []);
+        }
+
+        setMemories(persona.memories || []);
+        setJournal(persona.journal || []);
+        setAIProfileState({
+          ...persona,
+          imageGenerationInstructions: persona.imageGenerationInstructions !== undefined ? persona.imageGenerationInstructions : initialAIProfileState.imageGenerationInstructions
+        });
+        
+        // Reset interaction time to prevent immediate proactive messages from wrong persona
+        setLastInteractionTime(Date.now());
+        
+        addToast({ 
+          title: "Persona Switched", 
+          message: `Now chatting with ${persona.name}`, 
+          type: "success" 
+        });
+    }
+  };
+
+  const setUserProfile = (profile: UserProfile) => setUserProfileState(profile);
+
+  const setUserReferenceImage = (image: string | null) => {
+    setUserProfileState(prev => ({ ...prev, referenceImage: image }));
+    saveData();
+  };
+  
+  const addToGallery = React.useCallback((item: GalleryItem) => {
+    setGallery(prev => [item, ...prev]);
+    saveData();
+  }, [saveData]);
+
+  const deleteImageFromGallery = (id: string) => {
+    setGallery(prev => prev.filter(item => item.id !== id));
+    saveData();
+  };
+
+  const deleteImagesFromGallery = (ids: string[]) => {
+    setGallery(prev => prev.filter(item => !ids.includes(item.id)));
+    saveData();
+  };
+
+  const addJournalEntry = (entry: JournalEntry) => {
+    setJournal(prev => [entry, ...prev]);
+  };
+
+  const updateJournalEntry = (id: string, updates: Partial<JournalEntry>) => {
+    setJournal(prev => prev.map(entry => entry.id === id ? { ...entry, ...updates } : entry));
+  };
+
+  const deleteJournalEntry = (id: string) => {
+    setJournal(prev => prev.filter(entry => entry.id !== id));
+  };
+
+  const addToKnowledgeBase = (file: { name: string; content: string }) => {
+    setKnowledgeBase(prev => [...prev, file]);
+  };
+
+  const addMultipleToKnowledgeBase = (files: { name: string; content: string }[]) => {
+    setKnowledgeBase(prev => [...prev, ...files]);
+  };
+
+  const deleteFromKnowledgeBase = (name: string) => {
+    setKnowledgeBase(prev => prev.filter(file => file.name !== name));
+  };
+
+  const deleteMultipleFromKnowledgeBase = (names: string[]) => {
+    setKnowledgeBase(prev => prev.filter(file => !names.includes(file.name)));
+  };
+
+  const addMemory = (memory: Memory) => {
+    setMemories(prev => pruneMemories([...prev, { ...memory, lastAccessed: Date.now(), isImportant: memory.isImportant || false }]));
+  };
+
+  const updateMemory = (id: string, updates: Partial<Memory>) => {
+    setMemories(prev => prev.map(m => m.id === id ? { ...m, ...updates, lastAccessed: Date.now() } : m));
+  };
+
+  const deleteMemory = (id: string) => {
+    setMemories(prev => prev.filter(m => m.id !== id));
+  };
+
+  const addProactiveCommunication = (comm: ProactiveCommunication) => {
+    setProactiveCommunications(prev => [comm, ...prev]);
+    saveData();
+  };
+
+  const deleteProactiveCommunication = (id: string) => {
+    setProactiveCommunications(prev => prev.filter(c => c.id !== id));
+    saveData();
+  };
+
+  const addToast = (toast: Omit<Toast, 'id' | 'timestamp'>) => {
+    const id = Math.random().toString(36).substring(2, 9);
+    const newToast = { ...toast, id, timestamp: Date.now() };
+    setToasts(prev => [...prev, newToast]);
+    
+    // Auto remove after 8 seconds
+    setTimeout(() => {
+      removeToast(id);
+    }, 8000);
+  };
+
+  const removeToast = (id: string) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  };
+
+  const setApiKey = (key: string | null) => {
+      setApiKeyState(key);
+  };
+
+  const setOpenRouterApiKey = (key: string | null) => {
+    setOpenRouterApiKeyState(key);
+  };
+
+  const setAnthropicApiKey = (key: string | null) => {
+    setAnthropicApiKeyState(key);
+  };
+
+  const setKaggleApiKey = (key: string | null) => {
+    setKaggleApiKeyState(key);
+  };
+
+  const setOpenaiApiKey = (key: string | null) => {
+    setOpenaiApiKeyState(key);
+  };
+
+  const setStabilityApiKey = (key: string | null) => {
+    setStabilityApiKeyState(key);
+  };
+
+  const clearAllToasts = () => {
+    setToasts([]);
+  };
+
+  const setFcmToken = (token: string | null) => {
+    setFcmTokenState(token);
+  };
+
+  const exportData = async (chatHistory: ChatMessage[], sessions: ChatSession[], activeSessionId: string | null) => {
+    // Create a lean export object to reduce redundancy and file size
+    // We only need sessions, as chatHistory is just the messages of the active session
+    return {
+      aiProfile: {
+        ...aiProfile,
+        chatHistory: undefined,
+        sessions: undefined,
+        activeSessionId: undefined,
+        backgroundImages: undefined // Exclude background images from standard backup
+      },
+      savedPersonas: savedPersonas.map(p => ({
+        ...p,
+        chatHistory: undefined,
+        sessions: undefined,
+        activeSessionId: undefined,
+        backgroundImages: undefined // Exclude background images from standard backup
+      })),
+      userProfile,
+      // chatHistory is redundant if it's already in the sessions
+      // But we'll keep it for compatibility with the current importData logic
+      // which expects it at the root. However, we can make it lean.
+      chatHistory, 
+      sessions,
+      activeSessionId,
+      journal,
+      knowledgeBase,
+      memories,
+      // gallery is excluded from standard backup
+      apiKey,
+      asyncApiKey,
+      fcmToken,
+      autoSaveChatInterval,
+      autoJsonBackupInterval,
+      autoDriveBackup,
+      autoDriveBackupInterval,
+      isGoogleDriveConnected,
+      proactiveMessageFrequency: aiProfile.proactiveMessageFrequency,
+      notificationsEnabled,
+      showTimestamps,
+      aiCanGenerateImages: aiProfile.aiCanGenerateImages,
+      timeZone,
+      // backgrounds is excluded from standard backup
+    };
+  };
+
+  const exportGalleryData = async () => {
+    const chunks = await exportGalleryChunks(999999); // One giant chunk
+    return chunks[0];
+  };
+
+  const importGalleryData = async (compressedData: Uint8Array) => {
+    return importGalleryChunks([compressedData]);
+  };
+
+  const exportGalleryChunks = async (chunkSize: number = 2, mediaType?: 'image' | 'video') => {
+    const chunks: Uint8Array[] = [];
+    
+    const getItemMediaType = (item: GalleryItem): 'image' | 'video' => {
+      if (item.mediaType) return item.mediaType;
+      if (item.url.startsWith('data:video/') || item.url.startsWith('video/') || item.url.endsWith('.mp4') || item.url.endsWith('.webm') || item.url.endsWith('.mov')) return 'video';
+      return 'image';
+    };
+
+    const filteredGallery = mediaType 
+      ? gallery.filter(item => getItemMediaType(item) === mediaType)
+      : gallery;
+
+    // Split gallery into chunks
+    for (let i = 0; i < filteredGallery.length; i += chunkSize) {
+      const galleryChunk = filteredGallery.slice(i, i + chunkSize);
+      const data = {
+        gallery: galleryChunk,
+        // Only include backgrounds in the first chunk to avoid redundancy
+        backgrounds: i === 0 ? backgrounds : [],
+        aiProfileBackgrounds: i === 0 ? aiProfile.backgroundImages : []
+      };
+      const jsonString = JSON.stringify(data);
+      const uint8 = strToU8(jsonString);
+      chunks.push(gzipSync(uint8, { level: 9 }));
+    }
+    
+    // If gallery is empty but there are backgrounds, still create one chunk (only for 'all' or 'image' maybe?)
+    if (filteredGallery.length === 0 && (!mediaType || mediaType === 'image') && (backgrounds.length > 0 || aiProfile.backgroundImages?.length)) {
+      const data = {
+        gallery: [],
+        backgrounds,
+        aiProfileBackgrounds: aiProfile.backgroundImages
+      };
+      const jsonString = JSON.stringify(data);
+      const uint8 = strToU8(jsonString);
+      chunks.push(gzipSync(uint8, { level: 9 }));
+    }
+    
+    return chunks;
+  };
+
+  const importGalleryChunks = async (chunks: Uint8Array[]) => {
+    try {
+      let combinedGallery: any[] = [];
+      let combinedBackgrounds: any[] = [];
+      let combinedAIProfileBackgrounds: any[] = [];
+      
+      for (const chunk of chunks) {
+        const decompressed = gunzipSync(chunk);
+        const jsonString = strFromU8(decompressed);
+        const parsed = JSON.parse(jsonString);
+        
+        if (parsed.gallery) combinedGallery = [...combinedGallery, ...parsed.gallery];
+        if (parsed.backgrounds) combinedBackgrounds = [...combinedBackgrounds, ...parsed.backgrounds];
+        if (parsed.aiProfileBackgrounds) combinedAIProfileBackgrounds = [...combinedAIProfileBackgrounds, ...parsed.aiProfileBackgrounds];
+      }
+      
+      // Use a Map to deduplicate by ID
+      const deduplicate = (arr: any[]) => {
+        const map = new Map();
+        arr.forEach(item => map.set(item.id, item));
+        return Array.from(map.values());
+      };
+      
+      setGallery(prev => deduplicate([...prev, ...combinedGallery]));
+      setBackgrounds(prev => deduplicate([...prev, ...combinedBackgrounds]));
+      if (combinedAIProfileBackgrounds.length > 0) {
+        setAIProfileState(prev => ({ 
+          ...prev, 
+          backgroundImages: deduplicate([...(prev.backgroundImages || []), ...combinedAIProfileBackgrounds]) 
+        }));
+      }
+      
+      addToast({ title: "Gallery Restored", message: `Restored ${combinedGallery.length} images from ${chunks.length} chunks.`, type: "success" });
+    } catch (e) {
+      console.error("Failed to import gallery chunks", e);
+      addToast({ title: "Import Failed", message: "Failed to decompress or parse gallery chunks.", type: "error" });
+    }
+  };
+
+  const syncGalleryToCloud = async (mediaType?: 'image' | 'video') => {
+    if (!userId) {
+      addToast({ title: "Sync Failed", message: "User ID not found. Please interact with the AI first.", type: "error" });
+      return;
+    }
+
+    try {
+      addToast({ title: "Cloud Sync", message: `Preparing ${mediaType || 'gallery'} for cloud synchronization...`, type: "info" });
+      const chunks = await exportGalleryChunks(1, mediaType); // 1 image per chunk for maximum reliability
+      const timestamp = Date.now();
+      
+      if (chunks.length === 0) {
+        addToast({ title: "Sync", message: `No ${mediaType || 'gallery items'} to sync.`, type: "info" });
+        return;
+      }
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const blob = new Blob([chunk]);
+        const base64 = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const dataUrl = reader.result as string;
+            resolve(dataUrl.split(',')[1]);
+          };
+          reader.readAsDataURL(blob);
+        });
+
+        const payload = JSON.stringify({
+          userId,
+          data: {
+            galleryChunk: base64,
+            chunkIndex: i,
+            totalChunks: chunks.length,
+            galleryBackupTimestamp: timestamp,
+            mediaType: mediaType || 'all'
+          }
+        });
+        
+        const compressed = gzipSync(strToU8(payload));
+
+        const response = await fetchWithRetry('/api/sync', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/octet-stream',
+            'Content-Encoding': 'gzip'
+          },
+          body: compressed
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to sync chunk ${i + 1}/${chunks.length}: ${response.status}`);
+        }
+        
+        if (i % 5 === 0 || i === chunks.length - 1) {
+          console.log(`Synced gallery chunk ${i + 1}/${chunks.length}`);
+        }
+      }
+
+      addToast({ title: "Cloud Sync", message: `${mediaType ? (mediaType.charAt(0).toUpperCase() + mediaType.slice(1) + 's') : 'Gallery'} successfully synced to cloud in ${chunks.length} chunks!`, type: "success" });
+    } catch (e: any) {
+      console.error("Gallery cloud sync failed", e);
+      addToast({ title: "Sync Failed", message: e.message || "An error occurred during gallery cloud sync.", type: "error" });
+    }
+  };
+
+  const restoreGalleryFromCloud = async (mediaType?: 'image' | 'video') => {
+    if (!userId) {
+      addToast({ title: "Restore Failed", message: "User ID not found.", type: "error" });
+      return;
+    }
+
+    try {
+      addToast({ title: "Cloud Restore", message: `Fetching ${mediaType || 'gallery'} backup from cloud...`, type: "info" });
+      const response = await fetchWithRetry(`/api/sync/${userId}`, { method: 'GET' });
+      if (!response.ok) {
+        let errorMessage = "Failed to fetch cloud data";
+        try {
+          const error = await response.json();
+          errorMessage = error.error || errorMessage;
+        } catch (jsonError) {
+          console.warn("Failed to parse error response as JSON", jsonError);
+          errorMessage = `Server error: ${response.status} ${response.statusText}`;
+        }
+        throw new Error(errorMessage);
+      }
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonError) {
+        console.error("Failed to parse cloud data as JSON", jsonError);
+        throw new Error("Invalid data received from cloud storage.");
+      }
+      
+      const chunksKey = mediaType ? `galleryChunks_${mediaType}` : 'galleryChunks';
+      const backupData = data[chunksKey];
+
+      // Handle both old single backup, new chunked backup, and raw gallery array
+      if (backupData && Array.isArray(backupData)) {
+        const chunks: Uint8Array[] = [];
+        for (const base64 of backupData) {
+          const res = await fetch(`data:application/octet-stream;base64,${base64}`);
+          const blob = await res.blob();
+          chunks.push(new Uint8Array(await blob.arrayBuffer()));
+        }
+        await importGalleryChunks(chunks);
+      } else if (!mediaType && data.gallery && Array.isArray(data.gallery) && data.gallery.length > 0) {
+        // Handle raw gallery array if it was synced via general sync
+        setGallery(prev => {
+          const map = new Map();
+          [...prev, ...data.gallery].forEach(item => map.set(item.id, item));
+          return Array.from(map.values());
+        });
+        if (data.backgrounds) {
+          setBackgrounds(prev => {
+            const map = new Map();
+            [...prev, ...data.backgrounds].forEach(item => map.set(item.id, item));
+            return Array.from(map.values());
+          });
+        }
+        addToast({ title: "Gallery Restored", message: `Restored ${data.gallery.length} images from cloud sync.`, type: "success" });
+      } else if (!mediaType && data.galleryBackup) {
+        const base64 = data.galleryBackup;
+        const res = await fetch(`data:application/octet-stream;base64,${base64}`);
+        const blob = await res.blob();
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        await importGalleryData(bytes);
+      } else {
+        addToast({ title: "No Backup Found", message: `No ${mediaType || 'gallery'} backup found in the cloud for this user.`, type: "warning" });
+        return;
+      }
+    } catch (e: any) {
+      console.error("Gallery cloud restore failed", e);
+      addToast({ title: "Restore Failed", message: e.message || "An error occurred during cloud restore.", type: "error" });
+    }
+  };
+
+  const restoreGalleryFromDrive = async (mediaType?: 'image' | 'video') => {
+    if (!isGoogleDriveConnected) {
+      addToast({ title: "Not Connected", message: "Please connect to Google Drive in Settings first.", type: "warning" });
+      return;
+    }
+
+    try {
+      addToast({ title: "Drive Restore", message: `Searching for ${mediaType || 'gallery'} backups on Google Drive...`, type: "info" });
+      
+      const res = await fetch(`/api/drive/files?clientId=${googleClientId}&clientSecret=${googleClientSecret}`, { credentials: 'include' });
+      if (!res.ok) throw new Error("Failed to fetch files from Google Drive");
+      
+      const { files } = await res.json();
+      if (!files || files.length === 0) {
+        addToast({ title: "No Backups Found", message: "No gallery backups found on your Google Drive.", type: "warning" });
+        return;
+      }
+
+      // Filter for this AI's backups
+      // Pattern: {aiName}_gallery_backup_{timestamp}.gz OR {aiName}_gallery_part_{n}_{timestamp}.gz
+      const aiName = aiProfile.name;
+      const backupPrefix = mediaType ? `${aiName}_gallery_backup_${mediaType}` : `${aiName}_gallery_backup`;
+      const partPrefix = mediaType ? `${aiName}_gallery_part_${mediaType}` : `${aiName}_gallery_part`;
+      
+      const myBackups = files.filter((f: any) => 
+        f.name.startsWith(aiName) && 
+        (f.name.includes(backupPrefix) || f.name.includes(partPrefix))
+      );
+      
+      if (myBackups.length === 0) {
+        addToast({ title: "No Backups Found", message: `No ${mediaType || 'gallery'} backups found for ${aiName} on Google Drive.`, type: "warning" });
+        return;
+      }
+
+      // Group by timestamp and find the latest
+      // Extract timestamp from filename. Filename ends with YYYY-MM-DD.gz
+      const getTimestamp = (name: string) => {
+        const match = name.match(/(\d{4}-\d{2}-\d{2})\.gz$/);
+        return match ? match[1] : '';
+      };
+
+      const latestTimestamp = myBackups.reduce((latest: string, f: any) => {
+        const ts = getTimestamp(f.name);
+        return ts > latest ? ts : latest;
+      }, '');
+
+      if (!latestTimestamp) {
+        addToast({ title: "Restore Failed", message: "Could not determine the latest backup timestamp.", type: "error" });
+        return;
+      }
+
+      const latestParts = myBackups.filter((f: any) => getTimestamp(f.name) === latestTimestamp);
+      
+      // Sort by part number if chunked
+      latestParts.sort((a: any, b: any) => {
+        const getPart = (name: string) => {
+          const match = name.match(/part_(\d+)/);
+          return match ? parseInt(match[1]) : 0;
+        };
+        return getPart(a.name) - getPart(b.name);
+      });
+
+      addToast({ title: "Drive Restore", message: `Downloading ${latestParts.length} parts from ${latestTimestamp}...`, type: "info" });
+      
+      const chunks: Uint8Array[] = [];
+      for (const part of latestParts) {
+        const partRes = await fetch(`/api/drive/file/${part.id}?clientId=${googleClientId}&clientSecret=${googleClientSecret}`, { credentials: 'include' });
+        if (!partRes.ok) throw new Error(`Failed to download part: ${part.name}`);
+        
+        const { content } = await partRes.json();
+        const binaryRes = await fetch(`data:application/octet-stream;base64,${content}`);
+        const blob = await binaryRes.blob();
+        chunks.push(new Uint8Array(await blob.arrayBuffer()));
+      }
+
+      await importGalleryChunks(chunks);
+    } catch (e: any) {
+      console.error("Gallery Drive restore failed", e);
+      addToast({ title: "Restore Failed", message: e.message || "An error occurred during Drive restore.", type: "error" });
+    }
+  };
+
+  const importData = (
+    json: string, 
+    setChatHistory: (history: ChatMessage[]) => void,
+    setSessions: (sessions: ChatSession[]) => void,
+    setActiveSessionId: (id: string | null) => void
+  ) => {
+    try {
+      const parsed = JSON.parse(json);
+      
+      // 1. Restore AI Profile and Personas
+      const importedProfile = parsed.aiProfile || aiProfile;
+      setAIProfileState({
+        ...importedProfile,
+        imageGenerationInstructions: importedProfile.imageGenerationInstructions !== undefined ? importedProfile.imageGenerationInstructions : initialAIProfileState.imageGenerationInstructions
+      });
+      setSavedPersonas(parsed.savedPersonas || [importedProfile]);
+      
+      // 2. Restore Chat Data
+      const importedSessions = parsed.sessions || importedProfile.sessions || [];
+      const importedActiveId = parsed.activeSessionId || importedProfile.activeSessionId || (importedSessions.length > 0 ? importedSessions[0].id : null);
+      const importedHistory = parsed.chatHistory || importedProfile.chatHistory || [];
+
+      setSessions(importedSessions);
+      setActiveSessionId(importedActiveId);
+      
+      if (importedActiveId) {
+        const activeSession = importedSessions.find((s: any) => s.id === importedActiveId);
+        setChatHistory(activeSession ? activeSession.messages : importedHistory);
+      } else {
+        setChatHistory(importedHistory);
+      }
+
+      // 3. Restore Other App State
+      setUserProfileState(parsed.userProfile || userProfile);
+      setGallery(parsed.gallery || []);
+      setJournal(parsed.journal || []);
+      setKnowledgeBase(parsed.knowledgeBase || []);
+      setMemories(parsed.memories || []);
+      setApiKeyState(parsed.apiKey || null);
+      setAsyncApiKey(parsed.asyncApiKey || null);
+      setFcmTokenState(parsed.fcmToken || null);
+      setAutoSaveChatInterval(parsed.autoSaveChatInterval !== undefined ? parsed.autoSaveChatInterval : 30);
+      setAutoJsonBackupInterval(parsed.autoJsonBackupInterval !== undefined ? parsed.autoJsonBackupInterval : 5);
+      setAutoDriveBackupState(parsed.autoDriveBackup !== undefined ? parsed.autoDriveBackup : false);
+      setAutoDriveBackupInterval(parsed.autoDriveBackupInterval !== undefined ? parsed.autoDriveBackupInterval : 5);
+      setIsGoogleDriveConnected(parsed.isGoogleDriveConnected !== undefined ? parsed.isGoogleDriveConnected : false);
+      setProactiveMessageFrequency(parsed.proactiveMessageFrequency !== undefined ? parsed.proactiveMessageFrequency : 'off');
+      setNotificationsEnabledState(parsed.notificationsEnabled !== undefined ? parsed.notificationsEnabled : (typeof Notification !== 'undefined' && Notification.permission === 'granted'));
+      setShowTimestampsState(parsed.showTimestamps !== undefined ? parsed.showTimestamps : true);
+      setTimeZoneState(parsed.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone);
+      setBackgrounds(parsed.backgrounds || []);
+      
+      addToast({ title: "Import Successful", message: "All app data has been restored.", type: "success" });
+    } catch (e) {
+      console.error("Invalid JSON data", e);
+      addToast({ title: "Import Failed", message: "Failed to import data. Invalid JSON.", type: "error" });
+    }
+  };
+
+  const setFirebaseConfig = (config: { apiKey: string | null; projectId: string | null; appId: string | null; messagingSenderId: string | null; vapidKey: string | null }) => {
+    setFirebaseApiKey(config.apiKey);
+    setFirebaseProjectId(config.projectId);
+    setFirebaseAppId(config.appId);
+    setFirebaseMessagingSenderId(config.messagingSenderId);
+    setFirebaseVapidKey(config.vapidKey);
+  };
+
+  const setGoogleConfig = (clientId: string, clientSecret: string) => {
+    setGoogleClientId(clientId);
+    setGoogleClientSecret(clientSecret);
+  };
+
+  const setAutoSaveChat = (enabled: boolean) => setAutoSaveChatState(enabled);
+  const updateUserId = (id: string) => {
+    setUserId(id);
+    localStorage.setItem('indigo_user_id', id);
+  };
+  const setAutoJsonBackup = (enabled: boolean) => setAutoJsonBackupState(enabled);
+  const setAutoDriveBackup = (enabled: boolean) => setAutoDriveBackupState(enabled);
+  const setNotificationsEnabled = (enabled: boolean) => setNotificationsEnabledState(enabled);
+  const setIsDebuggerEnabled = (enabled: boolean) => {
+    console.log(`setIsDebuggerEnabled called with: ${enabled}`);
+    console.trace("setIsDebuggerEnabled trace");
+    setIsDebuggerEnabledState(enabled);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('indigo_debugger_enabled', String(enabled));
+      window.dispatchEvent(new Event('indigo_debugger_toggle'));
+    }
+  };
+  const setShowTimestamps = (show: boolean) => setShowTimestampsState(show);
+  const setProactiveMessageFrequency = (frequency: '1h' | '6h' | '12h' | '24h' | 'off') => {
+    setAIProfileState(prev => ({ ...prev, proactiveMessageFrequency: frequency }));
+  };
+
+  const setProactiveEmailFrequency = (frequency: '1h' | '6h' | '12h' | '24h' | 'off') => {
+    setAIProfileState(prev => ({ ...prev, proactiveEmailFrequency: frequency }));
+  };
+  const setAmbientMode = (enabled: boolean) => setAIProfileState(prev => ({ ...prev, ambientMode: enabled }));
+  const setAmbientFrequency = (frequency: '1h' | '6h' | '12h' | '24h' | 'off') => setAIProfileState(prev => ({ ...prev, ambientFrequency: frequency }));
+  const setAiCanGenerateImages = (enabled: boolean) => setAIProfileState(prev => ({ ...prev, aiCanGenerateImages: enabled }));
+  const setTimeZone = (tz: string) => setTimeZoneState(tz);
+  const addBackground = (background: Background) => {
+    setBackgrounds(prev => [background, ...prev]);
+  };
+
+  const deleteBackground = (id: string) => {
+    setBackgrounds(prev => prev.filter(b => b.id !== id));
+  };
+
+  const resetApp = async () => {
+      try {
+          await clearDB();
+          localStorage.clear();
+          // Reset all state variables to their initial values
+          setAIProfileState(initialAIProfileState);
+          setSavedPersonas([initialAIProfileState]);
+          setUserProfileState(initialUserProfileState);
+          setGallery([]);
+          setJournal([]);
+          setKnowledgeBase([]);
+          setMemories([]);
+          setApiKeyState(null);
+          setAutoSaveChatState(true);
+          setAutoSaveChatInterval(30);
+          setAutoJsonBackupState(false);
+          setAutoJsonBackupInterval(5);
+          setAIProfileState(prev => ({ ...prev, proactiveMessageFrequency: 'off', timeAwareness: true, ambientMode: false, ambientFrequency: 'off' }));
+          setTimeZoneState(Intl.DateTimeFormat().resolvedOptions().timeZone);
+          setShowTutorial(false);
+          setShowTimestampsState(true);
+          window.location.reload();
+      } catch (e) {
+          console.error("Failed to reset app", e);
+          throw e;
+      }
+  };
+
+  return (
+    <AppContext.Provider value={{
+      aiProfile, setAIProfile, savePersona, deletePersona, loadPersona,
+      savedPersonas, galleryLoaded, loadGallery,
+      userProfile, setUserProfile, setUserReferenceImage,
+      gallery, addToGallery, deleteImageFromGallery, deleteImagesFromGallery,
+      journal, addJournalEntry, updateJournalEntry, deleteJournalEntry,
+      knowledgeBase, addToKnowledgeBase, addMultipleToKnowledgeBase, deleteFromKnowledgeBase, deleteMultipleFromKnowledgeBase,
+      memories, addMemory, updateMemory, deleteMemory,
+      proactiveCommunications, addProactiveCommunication, deleteProactiveCommunication,
+      toasts, addToast, removeToast,
+      resetApp, exportData, importData,
+      apiKey, setApiKey,
+      showTutorial, setShowTutorial,
+      autoSaveChat, setAutoSaveChat,
+      autoSaveChatInterval, setAutoSaveChatInterval,
+      autoJsonBackup, setAutoJsonBackup,
+      autoJsonBackupInterval, setAutoJsonBackupInterval,
+      autoDriveBackup, setAutoDriveBackup,
+      autoDriveBackupInterval, setAutoDriveBackupInterval,
+      isGoogleDriveConnected, setIsGoogleDriveConnected,
+      isSyncEnabled, setIsSyncEnabled,
+      syncFrequency, setSyncFrequency,
+      notificationsEnabled, setNotificationsEnabled,
+      fcmToken, setFcmToken,
+      isDebuggerEnabled, setIsDebuggerEnabled,
+      showTimestamps, setShowTimestamps,
+      proactiveMessageFrequency: aiProfile.proactiveMessageFrequency, setProactiveMessageFrequency,
+      proactiveEmailFrequency: aiProfile.proactiveEmailFrequency, setProactiveEmailFrequency,
+      ambientMode: aiProfile.ambientMode, setAmbientMode,
+      ambientFrequency: aiProfile.ambientFrequency, setAmbientFrequency,
+      aiCanGenerateImages: aiProfile.aiCanGenerateImages, setAiCanGenerateImages,
+      timeZone, setTimeZone,
+      backgrounds, addBackground, deleteBackground,
+      asyncApiKey, setAsyncApiKey,
+      firebaseApiKey, firebaseProjectId, firebaseAppId, firebaseMessagingSenderId, firebaseVapidKey, setFirebaseConfig,
+      firebaseServiceAccountKey, setFirebaseServiceAccountKey,
+      googleClientId, googleClientSecret, setGoogleConfig,
+      openRouterApiKey, setOpenRouterApiKey,
+      anthropicApiKey, setAnthropicApiKey,
+      kaggleApiKey, setKaggleApiKey,
+      openaiApiKey, setOpenaiApiKey,
+      stabilityApiKey, setStabilityApiKey,
+      isLoaded, isSuccessfullyLoaded, lastInteractionTime, setLastInteractionTime,
+      userId, setUserId, isSyncing, setIsSyncing,
+      exportGalleryData, exportGalleryChunks, importGalleryData, importGalleryChunks, syncGalleryToCloud, restoreGalleryFromCloud, restoreGalleryFromDrive,
+      updateAIProfile, fetchWithRetry, clearAllToasts
+    }}>
+      {!isLoaded ? (
+        <div className="flex h-screen flex-col items-center justify-center bg-indigo-50 dark:bg-indigo-950 p-4 text-center">
+          <div className="text-indigo-900 dark:text-indigo-100 font-bold text-xl animate-pulse mb-4">Loading indigo AI...</div>
+          {showResetOption && (
+            <div className="max-w-xs animate-in fade-in slide-in-from-bottom-4 duration-700">
+              <p className="text-sm text-indigo-600 dark:text-indigo-400 mb-4">This is taking longer than expected. There might be an issue with your local data.</p>
+              <button 
+                onClick={() => {
+                  localStorage.clear();
+                  window.location.reload();
+                }}
+                className="text-xs text-red-600 dark:text-red-400 underline hover:text-red-800 dark:hover:text-red-200"
+              >
+                Reset App Data & Reload
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
+        children
+      )}
+    </AppContext.Provider>
+  );
+};
+
+export const useApp = () => {
+  const context = useContext(AppContext);
+  if (!context) throw new Error('useApp must be used within AppProvider');
+  return context;
+};

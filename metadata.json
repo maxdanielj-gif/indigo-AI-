@@ -1,0 +1,12 @@
+{
+  "name": "Copy of Copy of Remix: Remix: indigoAI",
+  "description": "A customizable AI chatbot with persona management, memory, and multi-modal capabilities.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera",
+    "geolocation",
+    "fullscreen",
+    "clipboard-write",
+    "notifications"
+  ]
+}
